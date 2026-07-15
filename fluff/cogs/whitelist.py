@@ -1,7 +1,9 @@
+import asyncio
 import sqlite3
 from typing import Optional
 
 import discord
+from discord import User
 from discord.ext import commands
 from discord.ext.commands import Cog
 
@@ -52,7 +54,16 @@ class Whitelist(Cog):
                     mention_author=False)
 
         user_name = user.display_name if user else ctx.author.display_name
-        return await self.create_and_send_whitelist_embed(f"Whitelisted users for {user_name}", f"whitelisted-users-{user_id}", ctx, whitelisted_users)
+
+        #user_ids = [1038816143940530247,1062334226231480432,1078749844123947058,1109940833505001583,1134683256638410782,1137130059212259388,1139568311034712106,1146981580997406864,1177624565858435213,1184296536360894486,1187563144705486898,1235521932032610306,1238180352183505031,1288561357943472209,1315691673199579137,1337241076750225458,1340981794799091742,1344752485004345344,1347698819684634745,1354032756136480821,1371919145926525131,1374539269397545000,1384491742891474944,1385801358598213703,1387110540484280380,1389002244753588419,1414024164368711781,1427350718792339547,1436425537378717727,1457743956233162814,1475653092178657312,1476744731923841025,1483273693034446988,1487114621297889411,1488114257424941159,1492602639442116648,167093492424769538,212719295124209664,236210278025396224,307312147430637568,308949254225920001,363810458492469258,369532049989828608,450447141136236555,474434185864675328,487360805898027008,710991863804592158,762330705358880770,792935043466526761,861356914759696455,930534872991297607,944243530140880947,951308529577361479,956842100413059072,962200353095426078,966264898717876304,993614975803347139]
+        #for user_id_test in user_ids:
+        #    testuser = await self.bot.fetch_user(user_id_test)
+        #    if testuser is not None:
+        #        self.bot.log.info(f"{user_id_test}, {testuser.name}")
+        #    await asyncio.sleep(1)
+
+        #return await self.create_and_send_whitelist_embed(f"Whitelisted users for {user_name}", f"whitelisted-users-{user_id}", ctx, whitelisted_users)
+        return await self.create_and_send_whitelist_embed2(ctx, f"Whitelisted users for {user_name}", whitelisted_users)
 
     @whitelist.command()
     @commands.guild_only()
@@ -70,7 +81,7 @@ class Whitelist(Cog):
                 content="No one has whitelisted you yet.",
                 mention_author=False)
 
-        return await self.create_and_send_whitelist_embed(f"Users who have whitelisted {ctx.author.display_name}", f"users-who-whitelisted-{ctx.author.id}", ctx, users_who_have_whitelisted_author)
+        return await self.create_and_send_whitelist_embed2(ctx, f"Users who have whitelisted {ctx.author.display_name}", users_who_have_whitelisted_author)
 
     @whitelist.command()
     @commands.guild_only()
@@ -80,13 +91,13 @@ class Whitelist(Cog):
             return await ctx.reply(content="Please include at least one valid user ID or user mention",
                                    mention_author=False)
 
-        user_ids_to_whitelist = list()
+        user_ids_to_whitelist: list[tuple[int, str]] = list()
         for member in members:
             if member.id == ctx.author.id:
                 return await ctx.reply(content="Cannot add yourself to your whitelist", mention_author=False)
             if member.bot:
                 return await ctx.reply(content="Bots cannot be added to your whitelist", mention_author=False)
-            user_ids_to_whitelist.append(member.id)
+            user_ids_to_whitelist.append((member.id, member.name))
         inserted = 0
         try:
             inserted = await self.whitelist_ping_repo.add_whitelisted_users(ctx.author.id, user_ids_to_whitelist)
@@ -156,6 +167,29 @@ class Whitelist(Cog):
         else:
             await ctx.reply(embed=embed, mention_author=False)
 
+    async def create_and_send_whitelist_embed2(self, ctx: commands.Context, title: str, user_ids: list[tuple[int, str]]):
+        entries = []
+        for uid, name in user_ids:
+            entries.append((uid, discord.utils.escape_markdown(name)))
+            #member = ctx.guild.get_member(uid)
+            #compare here and replace in db if different
+            #if member:
+            #    entries.append((uid, member.name))
+            #else:
+                #replace with username from DB here
+            #    entries.append((uid, 'abcdefghijklmnopqrstuvwxyzaaaaaaaaaa'))
+
+        view = WhitelistTextPaginator(entries, title, ctx.author.id)
+        embeddd = view.build_embed()
+        self.bot.log.info(f"embed size: {len(embeddd)}")
+        msg = await ctx.reply(
+            embed=embeddd,
+            view=view if view.max_page > 0 else None,
+            mention_author=False,
+        )
+        if view.max_page > 0:
+            view.message = msg
+
     def partition_user_mentions(self, user_ids: list[int]) -> list[str]:
         """Partitions user ID's into a list of user mentions. A discord embed only allows up to 1024 characters.
         Any more than that, and we get an error. This method splits up user mentions into a list so that we can create
@@ -187,3 +221,96 @@ class Whitelist(Cog):
 async def setup(bot):
     await bot.add_cog(Whitelist(bot))
 
+ENTRIES_PER_PAGE = 20
+class WhitelistTextPaginator(discord.ui.View):
+    def __init__(self, entries: list[tuple[int, str]], title: str, author_id: int):
+        super().__init__(timeout=180)
+        self.entries = entries  # (user_id, username)
+        self.title = title
+        self.author_id = author_id
+        self.index = 0
+        self.max_page = (len(entries) - 1) // ENTRIES_PER_PAGE
+        self.message: discord.Message | None = None  # set this after sending
+        self._update_buttons()
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+    def _update_buttons(self):
+        self.previous_page.disabled = self.index == 0
+        self.next_page.disabled = self.index == self.max_page
+
+    def build_embed(self) -> discord.Embed:
+        start = self.index * ENTRIES_PER_PAGE
+        page_entries = self.entries[start:start + ENTRIES_PER_PAGE]
+
+        #lines = [f"**{i + 1}.** {username} - `{user_id}`" for i, (user_id, username) in enumerate(page_entries, start=start)]
+        #lines = [f"**{i + 1}.** {username} - <@{user_id}>" for i, (user_id, username) in enumerate(page_entries, start=start)]
+        lines = [f"**{i + 1}.** <@{user_id}> ({username})" for i, (user_id, username) in enumerate(page_entries, start=start)]
+
+        embed = discord.Embed(
+            title=self.title,
+            description="\n".join(lines),
+            color=discord.Color.light_embed(),
+        )
+        embed.set_footer(text=f"Page {self.index + 1}/{self.max_page + 1} • {len(self.entries)} total")
+        return embed
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            return False
+        return True
+
+    @discord.ui.button(label="🔢", style=discord.ButtonStyle.primary)
+    async def jump_to_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(PageSelectModal(self))
+
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary)
+    async def previous_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.index -= 1
+        self._update_buttons()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary)
+    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.index += 1
+        self._update_buttons()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+
+class PageSelectModal(discord.ui.Modal, title="Jump to Page"):
+    def __init__(self, paginator_view: "WhitelistTextPaginator"):
+        super().__init__()
+        self.paginator_view = paginator_view
+
+        self.page_input = discord.ui.TextInput(
+            label=f"Page number (1-{paginator_view.max_page + 1})",
+            placeholder="e.g. 3",
+            min_length=1,
+            max_length=len(str(paginator_view.max_page + 1)),
+            required=True,
+        )
+        self.add_item(self.page_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = self.page_input.value.strip()
+
+        if not raw.isdigit():
+            return await interaction.response.send_message("That's not a valid page number.", ephemeral=True)
+
+        page = int(raw)
+        if page < 1 or page > self.paginator_view.max_page + 1:
+            return await interaction.response.send_message(
+                f"Page must be between 1 and {self.paginator_view.max_page + 1}.",
+                ephemeral=True,
+            )
+
+        self.paginator_view.index = page - 1
+        self.paginator_view._update_buttons()
+        await interaction.response.edit_message(embed=self.paginator_view.build_embed(), view=self.paginator_view)

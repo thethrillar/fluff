@@ -5,28 +5,52 @@ class WhitelistPingRepository:
     def __init__(self, db: Database):
         self.db = db
 
-    async def get_whitelisted_users(self, user_id: int) -> list[int]:
-        """Gets a list of user ID's that are in this users whitelist"""
+    async def get_whitelisted_users(self, user_id: int) -> list[tuple[int, str]]:
+        """Gets a list of user ID and name pairs that are in this users whitelist"""
         async with self.db.get_read_connection() as conn:
             cursor = await conn.execute(
-                "SELECT whitelisted_user_id FROM whitelist_ping WHERE user_id = ?",
+                "SELECT wp.whitelisted_user_id, um.name "
+                "FROM whitelist_ping wp LEFT JOIN "
+                "user_metadata um ON wp.whitelisted_user_id = um.id "
+                "WHERE wp.user_id = ? "
+                "ORDER BY um.name ASC",
                 (str(user_id),)
             )
             rows = await cursor.fetchall()
 
-            return [int(row[0]) for row in rows]
+            result: list[tuple[int, str]] = []
+            for row in rows:
+                whitelisted_user_id = int(row[0])
+                whitelisted_user_name = row[1]
+                if not whitelisted_user_name:
+                    whitelisted_user_name = 'username unknown'
 
-    async def get_users_who_whitelisted_user(self, user_id: int) -> list[int]:
+                result.append((whitelisted_user_id, whitelisted_user_name))
+
+            return result
+
+    async def get_users_who_whitelisted_user(self, user_id: int) -> list[tuple[int, str]]:
         """Gets a list of user ID's who have whitelisted this user"""
         async with self.db.get_read_connection() as conn:
             cursor = await conn.execute(
-                "SELECT user_id FROM whitelist_ping WHERE whitelisted_user_id = ?",
+                "SELECT wp.user_id, um.name "
+                "FROM whitelist_ping wp LEFT JOIN "
+                "user_metadata um ON wp.user_id = um.id "
+                "WHERE whitelisted_user_id = ?",
                 (str(user_id),)
             )
             rows = await cursor.fetchall()
 
-            return [int(row[0]) for row in rows]
+            result: list[tuple[int, str]] = []
+            for row in rows:
+                whitelisted_user_id = int(row[0])
+                whitelisted_user_name = row[1]
+                if not whitelisted_user_name:
+                    whitelisted_user_name = 'username unknown'
 
+                result.append((whitelisted_user_id, whitelisted_user_name))
+
+            return result
 
     async def is_user_in_whitelist(self, pinged_user_id: int, pinged_by_id: int) -> bool:
         """Determines if the pinged_by user is in the pinged user's whitelist.
@@ -42,17 +66,25 @@ class WhitelistPingRepository:
             row = await cursor.fetchone()
             return bool(row[0])
 
-    async def add_whitelisted_users(self, user_id: int, users_to_whitelist: list[int]) -> int:
+    async def add_whitelisted_users(self, user_id: int, users_to_whitelist: list[tuple[int, str]]) -> int:
         """Adds the list of user ID's to the users whitelist"""
         async with self.db.get_write_connection() as conn:
             inserted = 0
-            for user_id_to_whitelist in users_to_whitelist:
+            for user_id_to_whitelist, user_name_to_add in users_to_whitelist:
                 cursor = await conn.execute(
                     "INSERT OR IGNORE INTO whitelist_ping (user_id, whitelisted_user_id) "
                     "VALUES (?,?)",
                     (str(user_id), str(user_id_to_whitelist))
                 )
                 inserted += cursor.rowcount
+
+                conn.execute(
+                    "INSERT INTO user_metadata (id, name) "
+                    "VALUES (?, ?) "
+                    "ON CONFLICT (id) DO UPDATE SET name = ? "
+                    "WHERE name != ?",
+                    (user_id, name, name, name),
+                )
             await conn.commit()
 
             return inserted

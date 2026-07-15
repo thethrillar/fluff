@@ -1,0 +1,4 @@
+CREATE TABLE user_metadata (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL
+) STRICT;
