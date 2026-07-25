@@ -82,9 +82,9 @@ class Basic(Cog):
         - `target`
         Who you wish to show the banner of. Optional."""
         if target is not None:
-            target = self.bot.get_user(target.id)
+            target = await self.bot.fetch_user(target.id)
         else:
-            target = ctx.author
+            target = await self.bot.fetch_user(ctx.author.id)
 
         if target is None:
             return await ctx.reply(
