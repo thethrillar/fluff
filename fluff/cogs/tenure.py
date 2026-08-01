@@ -193,6 +193,9 @@ class Tenure(Cog):
         status_msg = await ctx.reply("Processing..", mention_author=False)
 
         if tenure_disabled_role in user.roles:
+            await user.remove_roles(
+                tenure_disabled_role, reason=f"Fluff Tenure (Prohibition enforcement: Enablement)"
+            )
             await user.add_roles(
                 tenure_role, reason="Fluff Tenure (Prohibition enforcement: Enablement)"
             )

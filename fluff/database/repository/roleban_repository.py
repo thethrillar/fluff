@@ -21,7 +21,8 @@ class RolebanRepository:
                 "SELECT rs.id AS id, rs.server_id AS server_id, rs.channel_id AS channel_id, rs.type AS type, rs.created_at AS created_at, "
                 "GROUP_CONCAT(rsu.user_id) AS user_ids, "
                 "GROUP_CONCAT(rsu.rolebanned_by) AS rolebanned_bys, "
-                "GROUP_CONCAT(rsu.status) AS statuses "
+                "GROUP_CONCAT(rsu.status) AS statuses, "
+                "rs.start_time AS start_time "
                 "FROM roleban_session rs LEFT JOIN roleban_session_user rsu "
                 "ON rs.id = rsu.session_id "
                 "WHERE rs.server_id = ? "
@@ -74,6 +75,7 @@ class RolebanRepository:
                 channel_id=channel_id,
                 type=roleban_type,
                 created_at=created_at,
+                start_time=-1,
                 users=users
             )
 
@@ -128,6 +130,15 @@ class RolebanRepository:
             await conn.commit()
             return cursor.rowcount
 
+    async def update_roleban_start_time(self, session_id: int, start_time: int) -> None:
+        """Sets the start time for this session"""
+        async with self.db.get_write_connection() as conn:
+            cursor = await conn.execute(
+                "UPDATE roleban_session SET start_time = ? WHERE id = ?",
+                (str(start_time), session_id)
+            )
+            await conn.commit()
+
     async def reactivate_user_session(self, session_id: int, user_id: int, channel_id: int) -> int:
         """Reactivates a 'left' session after the user rejoined, pointing the parent session at the (possibly new) channel ID
         Returns: the number of updated rows"""
@@ -151,7 +162,8 @@ class RolebanRepository:
                 "SELECT rs.id AS id, rs.server_id AS server_id, rs.channel_id AS channel_id, rs.type AS type, rs.created_at AS created_at, "
                 "GROUP_CONCAT(rsu.user_id) AS user_ids, "
                 "GROUP_CONCAT(rsu.rolebanned_by) AS rolebanned_bys, "
-                "GROUP_CONCAT(rsu.status) AS statuses "
+                "GROUP_CONCAT(rsu.status) AS statuses, "
+                "rs.start_time AS start_time "
                 "FROM roleban_session rs JOIN roleban_session_user rsu "
                 "ON rs.id = rsu.session_id "
                 "WHERE rs.server_id = ? AND rsu.user_id = ? "
@@ -169,7 +181,8 @@ class RolebanRepository:
                 "SELECT rs.id AS id, rs.server_id AS server_Id, rs.channel_id AS channel_id, rs.type AS type, rs.created_at AS created_at, "
                 "GROUP_CONCAT(rsu.user_id) AS user_ids, "
                 "GROUP_CONCAT(rsu.rolebanned_by) AS rolebanned_bys, "
-                "GROUP_CONCAT(rsu.status) AS statuses "
+                "GROUP_CONCAT(rsu.status) AS statuses, "
+                "rs.start_time AS start_time "
                 "FROM roleban_session rs LEFT JOIN roleban_session_user rsu "
                 "ON rs.id = rsu.session_id "
                 "WHERE rs.server_id = ? AND rs.channel_id = ? "
@@ -209,5 +222,6 @@ class RolebanRepository:
             channel_id=int(row["channel_id"]) if row["channel_id"] is not None else None,
             type=RolebanType(row["type"]),
             created_at=int(row["created_at"]),
+            start_time=int(row["start_time"]),
             users=users
         )

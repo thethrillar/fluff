@@ -6,9 +6,12 @@ import discord
 from discord.ext import commands
 from discord.ext.commands import Cog
 
+from database.model.LeaderboardEntry import LeaderboardEntry
 from database.model.RolebanSession import RolebanSession, RolebanSessionUser
+from database.repository.rule_push_leaderboard_repository import RulePushLeaderboardRepository
 from database.repository.rule_push_repository import RulePushRepository
 from database.repository.rule_repository import RuleRepository
+from database.repository.user_metadata_repository import UserMetadataRepository
 from helpers.checks import ismod, check_if_target_is_staff
 from helpers.embeds import (
     stock_embed,
@@ -23,9 +26,7 @@ from model.RolebanType import RolebanType
 
 CHANNEL_NAME_PATTERN = re.compile(r"^rulepush(\d+)$")
 DISCORD_MESSAGE_LIMIT = 2000
-
-MAX_ANSWER_MESSAGE_LENGTH = 100
-
+MAX_MILLISECONDS_RULEPUSH_LEADERBOARD = 86400000
 
 class RulePush(Cog):
     """Forces a user to re-read the rules.
@@ -37,24 +38,29 @@ class RulePush(Cog):
     def __init__(self, bot):
         self.bot = bot
         self.rule_push_repo: RulePushRepository = RulePushRepository(self.bot.db)
+        self.rule_push_leaderboard_repo: RulePushLeaderboardRepository = RulePushLeaderboardRepository(self.bot.db)
+        self.user_metadata_repo: UserMetadataRepository = UserMetadataRepository(self.bot.db)
         self.rule_repo: RuleRepository = RuleRepository(self.bot.db)
 
-    async def send_long_message(self, channel: discord.TextChannel, text: str):
+    async def send_long_message(self, channel: discord.TextChannel, text: str) -> discord.Message:
         """Sends text if its under the message limit, otherwise sends the message in fixed DISCORD_MESSAGE_LIMIT-sized chunks."""
         lines = text.split("\n")
         current_chunk = ""
 
+        final_message: discord.Message = None
         for line in lines:
             # +1 for the newline we'll add
             if len(current_chunk) + len(line) + 1 > DISCORD_MESSAGE_LIMIT:
                 if current_chunk:
-                    await channel.send(current_chunk, allowed_mentions=discord.AllowedMentions.none())
+                    final_message = await channel.send(current_chunk, allowed_mentions=discord.AllowedMentions.none())
                 current_chunk = line
             else:
                 current_chunk = current_chunk + "\n" + line if current_chunk else line
 
         if current_chunk:
-            await channel.send(current_chunk, allowed_mentions=discord.AllowedMentions.none())
+            final_message = await channel.send(current_chunk, allowed_mentions=discord.AllowedMentions.none())
+
+        return final_message
 
     @commands.check(ismod)
     @commands.guild_only()
@@ -79,67 +85,8 @@ class RulePush(Cog):
             )
         if member.id == ctx.author.id:
             return await ctx.reply("You cannot rulepush yourself.", mention_author=False)
-        if member.bot:
-            return await ctx.reply("You cannot rulepush a bot.", mention_author=False)
-        if check_if_target_is_staff(self.bot, member, self.bot.config_service):
-            return await ctx.reply("You cannot rulepush staff members.", mention_author=False)
 
-        try:
-            rules = await self.rule_repo.get_rules(ctx.guild.id)
-            all_keywords = await self.rule_push_repo.get_keywords(ctx.guild.id)
-        except sqlite3.Error as err:
-            self.bot.log.error(f"Error loading rules/keywords for server {ctx.guild.id}: {err}")
-            return await ctx.reply("Database error while loading rules and keywords.", mention_author=False)
-
-        if not rules:
-            return await ctx.reply("No rules exist yet! Use `pls help rule`.", mention_author=False)
-
-        chosen_keywords = select_push_keywords(all_keywords)
-        if chosen_keywords is None:
-            return await ctx.reply(
-                f"At least {KEYWORDS_PER_PUSH} distinct keywords are required! Use `pls rulepush add`.",
-                mention_author=False,
-            )
-
-        rendered_rules = render_rules(rules, chosen_keywords)
-        if rendered_rules is None:
-            return await ctx.reply(
-                f"Not enough `{{{{}}}}` slots in the rules! At least {KEYWORDS_PER_PUSH} eligible slots are required.",
-                mention_author=False,
-            )
-
-        session: RolebanSession = await self.bot.roleban_service.roleban_users(ctx, [member], RolebanType.RULEPUSH)
-        if session is None:
-            return
-
-        try:
-            await self.rule_push_repo.create_rulepush_session_keywords(session.id, chosen_keywords)
-        except sqlite3.Error as err:
-            self.bot.log.error(f"Error while adding keyword for rulepush session: {err}")
-            await self.bot.roleban_service.unroleban_user(ctx, session, member.id, ctx.guild.get_channel(session.channel_id))
-            await self.bot.roleban_service.delete_roleban_channel(self.bot.get_channel(session.channel_id), "Keyword DB setup failed, deleting channel", session.id)
-            return await ctx.reply(f"Error while creating rulepush session: {err}", mention_author=False)
-
-        rulepush_channel: discord.TextChannel = self.bot.get_channel(session.channel_id)
-        rules_message = ""
-        for rule in rendered_rules:
-            rules_message += f"**Rule {rule.rule_number}. {rule.title}**\n{rule.content}"
-
-
-        await self.send_long_message(rulepush_channel, rules_message)
-
-        await rulepush_channel.send(
-            f"{member.mention}, you've been sent here by staff to re-read the server rules.\n\n"
-            f"Hidden in the rules above are **{KEYWORDS_PER_PUSH} words that don't belong**. "
-            f"Read carefully and type each out-of-place word in this channel. "
-            f"Once you have found all {KEYWORDS_PER_PUSH} words, you will be automatically removed from this channel.",
-            allowed_mentions=discord.AllowedMentions(users=True),
-        )
-
-        try:
-            await ctx.message.add_reaction("📖")
-        except (discord.Forbidden, discord.HTTPException):
-            pass
+        return await self.perform_rulepush(ctx, member)
 
     @commands.bot_has_permissions(manage_roles=True, manage_channels=True)
     @commands.check(ismod)
@@ -200,20 +147,23 @@ class RulePush(Cog):
             status = "🔴 Active" if user.status == RolebanStatus.ACTIVE.value else "🚪 User left"
             dt = datetime.fromtimestamp(session.created_at, tz=timezone.utc)
 
-            keywords = None
+            found_keywords: list[str] = []
+            not_found_keywords: list[str] = []
             try:
-                keywords = await self.rule_push_repo.get_keywords_for_session(session.id)
+                found_keywords, not_found_keywords = await self.rule_push_repo.get_keywords_for_session(session.id)
             except sqlite3.Error as err:
                 self.bot.log.error(f"error fetching keywords for session {session.id}: {err}")
 
-            keyword_value = ", ".join(keywords) if keywords else "Could not fetch keywords"
+            found_keyword_value = ", ".join(found_keywords) if found_keywords else "None"
+            not_found_keyword_value = ", ".join(not_found_keywords) if not_found_keywords else "None"
 
             embed.add_field(
                 name=f"{status} - #{channel.name}" if channel else status,
                 value=(
                     f"> User: <@{user.user_id}>\n"
                     f"> Channel: {location}\n"
-                    f"> Keywords: {keyword_value}\n"
+                    f"> Found keywords: {found_keyword_value}\n"
+                    f"> Unfound Keywords: {not_found_keyword_value}\n"
                     f"> Rolebanned by: <@{user.rolebanned_by}>\n"
                     f"> Rolebanned: {discord.utils.format_dt(dt, 'R')}"
                 ),
@@ -230,6 +180,10 @@ class RulePush(Cog):
         """This lists the rulepush keywords for this server.
 
         No arguments."""
+        should_print_keywords: bool = await self.confirm_action(ctx, ctx.channel)
+        if not should_print_keywords:
+            return
+
         try:
             server_keywords: list[str] = await self.rule_push_repo.get_keywords(ctx.guild.id)
         except sqlite3.Error as err:
@@ -323,6 +277,131 @@ class RulePush(Cog):
 
         return await ctx.reply(f"no keywords were deleted, they did not exist.", mention_author=False)
 
+
+    @rulepush.command(aliases=["leaderboards"])
+    @commands.guild_only()
+    async def leaderboard(self, ctx: commands.Context):
+        """Returns the top 20 fastest rulepush times"""
+        leaderboard_entries: list[LeaderboardEntry] = await self.rule_push_leaderboard_repo.get_rule_push_leaderboard()
+
+        if not leaderboard_entries:
+            return await ctx.reply("No rulepush leaderboard entries found.", mention_author=False)
+
+        embed = stock_embed(self.bot)
+        embed.title = "🏆 Rule Push Leaderboard"
+        embed.color = discord.Color.gold()
+
+        medals = {0: "🥇", 1: "🥈", 2: "🥉"}
+        lines = []
+
+        for rank, entry in enumerate(leaderboard_entries):
+            position = medals.get(rank, f"**{rank + 1}.**")
+            minutes, remainder_ms = divmod(entry.completion_time, 60000)
+            seconds = remainder_ms / 1000
+            time_str = f"{minutes}m, {seconds:.3f}s"
+            date_str = f"<t:{entry.completion_date}:d> at <t:{entry.completion_date}:T>"
+            lines.append(f"{position} **{time_str}** by <@{entry.user_id}> ({entry.user_name}) on {date_str}\n")
+
+        embed.description = "\n".join(lines)
+        embed.set_footer(text=f"Top 20 entries")
+
+        return await ctx.reply(embed=embed, mention_author=False)
+
+    @rulepush.command(aliases=["myself"])
+    @commands.bot_has_permissions(manage_roles=True, manage_channels=True)
+    @commands.guild_only()
+    async def me(self, ctx: commands.Context):
+        """Rolebans the user who invoked the method"""
+        if ctx.author is None or ctx.guild is None:
+            return await ctx.reply("You must be in a server to do this.", mention_author=False)
+
+        return await self.perform_rulepush(ctx, ctx.author)
+
+    @Cog.listener()
+    async def on_ping_violation_threshold_reached(self, message: discord.Message):
+        ctx: commands.Context = await self.bot.get_context(message)
+        if ctx is None or ctx.author is None or ctx.guild is None:
+            return
+
+        await self.perform_rulepush(ctx, ctx.author, True)
+        return await message.reply(
+                    f"**{self.bot.pacify_name(message.author.name)}** has been automatically rulepushed for reaching the reply ping preference violation threshold."
+                )
+
+    async def perform_rulepush(self, ctx: commands.Context, member: discord.Member, ping_violation: bool = False):
+        """performs the actual rulepush action"""
+        if member.bot:
+            return await ctx.reply("You cannot rulepush a bot.", mention_author=False)
+        if check_if_target_is_staff(self.bot, member, self.bot.config_service):
+            return await ctx.reply("You cannot rulepush staff members.", mention_author=False)
+
+        try:
+            rules = await self.rule_repo.get_rules(ctx.guild.id)
+            all_keywords = await self.rule_push_repo.get_keywords(ctx.guild.id)
+        except sqlite3.Error as err:
+            self.bot.log.error(f"Error loading rules/keywords for server {ctx.guild.id}: {err}")
+            return await ctx.reply("Database error while loading rules and keywords.", mention_author=False)
+
+        if not rules:
+            return await ctx.reply("No rules exist yet! Use `pls help rule`.", mention_author=False)
+
+        chosen_keywords = select_push_keywords(all_keywords)
+        if chosen_keywords is None:
+            return await ctx.reply(
+                f"At least {KEYWORDS_PER_PUSH} distinct keywords are required! Use `pls rulepush add`.",
+                mention_author=False,
+            )
+
+        rendered_rules = render_rules(rules, chosen_keywords)
+        if rendered_rules is None:
+            return await ctx.reply(
+                f"Not enough `{{{{}}}}` slots in the rules! At least {KEYWORDS_PER_PUSH} eligible slots are required.",
+                mention_author=False,
+            )
+
+        session: RolebanSession = await self.bot.roleban_service.roleban_users(ctx, [member], RolebanType.RULEPUSH)
+        if session is None:
+            return
+
+        try:
+            await self.rule_push_repo.create_rulepush_session_keywords(session.id, chosen_keywords)
+        except sqlite3.Error as err:
+            self.bot.log.error(f"Error while adding keyword for rulepush session: {err}")
+            await self.bot.roleban_service.unroleban_user(ctx, session, member.id, ctx.guild.get_channel(session.channel_id))
+            await self.bot.roleban_service.delete_roleban_channel(self.bot.get_channel(session.channel_id), "Keyword DB setup failed, deleting channel", session.id)
+            return await ctx.reply(f"Error while creating rulepush session: {err}", mention_author=False)
+
+        rulepush_channel: discord.TextChannel = self.bot.get_channel(session.channel_id)
+        rules_message = ""
+        for rule in rendered_rules:
+            if rule.rule_number < 0:
+                rules_message += f"**{rule.title}**\n{rule.content}"
+            else:
+                rules_message += f"**Rule {rule.rule_number}. {rule.title}**\n{rule.content}"
+
+        final_message: discord.Message = await self.send_long_message(rulepush_channel, rules_message)
+        epoch_start_time_ms = int(final_message.created_at.timestamp() * 1000)
+        await self.bot.roleban_service.update_session_start_time(session.id, epoch_start_time_ms)
+
+        await rulepush_channel.send(
+            f"{member.mention}, you've been sent here by staff to re-read the server rules.\n\n"
+            f"Hidden in the rules above are **{KEYWORDS_PER_PUSH} words that don't belong**. "
+            f"Read carefully and type each out-of-place word in this channel. "
+            f"Once you have found all {KEYWORDS_PER_PUSH} words, you will be automatically removed from this channel.",
+            allowed_mentions=discord.AllowedMentions(users=True),
+        )
+
+        if ping_violation:
+            await rulepush_channel.send(
+                f"For future reference, please pay attention to a users ping preference.",
+                file=discord.File("assets/noreply.png"),
+            )
+
+        try:
+            await ctx.message.add_reaction("📖")
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
     @Cog.listener()
     async def on_message(self, message: discord.Message):
         """Checks messages in rulepush channels against the sessions remaining keywords"""
@@ -335,7 +414,7 @@ class RulePush(Cog):
         if check_if_target_is_staff(self.bot, message.author, self.bot.config_service):
             return
 
-        session = await self.bot.roleban_service.get_roleban_session_by_channel(message.guild.id, message.channel.id)
+        session: RolebanSession = await self.bot.roleban_service.get_roleban_session_by_channel(message.guild.id, message.channel.id)
         if session is None or session.users is None or len(session.users) <= 0:
             return
 
@@ -346,11 +425,11 @@ class RulePush(Cog):
         if session_user_status != RolebanStatus.ACTIVE.value or session_user_id != message.author.id:
             return
 
-        if len(message.content) > MAX_ANSWER_MESSAGE_LENGTH:
-            return await message.channel.send("That's a lot of text! Type one word at a time.", mention_author=False)
+        guessed_word: str = message.content.lower().strip()
+        if len(guessed_word.split()) > 1:
+            return await message.channel.send("I don't recognize that message! Please send each word separately and alone in its own message!", mention_author=False)
 
         try:
-            guessed_word = message.content.lower().strip()
             updated, found_count, total = await self.rule_push_repo.mark_keyword_found_and_count(session.id, guessed_word)
         except sqlite3.Error as err:
             self.bot.log.error(f"Error marking keyword found for rulepush session {session.id}: {err}")
@@ -360,6 +439,21 @@ class RulePush(Cog):
             return  # not a keyword or already found
 
         if found_count >= total:
+            if session.start_time > 0:
+                #make sure user metadata is up to date with users name
+                try:
+                    await self.user_metadata_repo.update_user_metadata(message.author.id, message.author.name)
+                except sqlite3.Error as err:
+                    self.bot.log.error(f"Error updating user_metadata for {message.author.id}: {err}")
+
+                end_time = int(message.created_at.timestamp() * 1000)
+                total_elapsed_millis = end_time - session.start_time
+                if total_elapsed_millis < MAX_MILLISECONDS_RULEPUSH_LEADERBOARD:
+                    try:
+                        await self.rule_push_leaderboard_repo.update_rule_push_leaderboard(message.author.id, total_elapsed_millis, int(message.created_at.timestamp()))
+                    except sqlite3.Error as err:
+                        self.bot.log.error(f"Error updating rulepush leaderboard for {message.author.id}: {err}")
+
             ctx: commands.Context = await self.bot.get_context(message)
             released = await self.bot.roleban_service.unroleban_user(ctx, session, message.author.id, message.channel)
             if released:
@@ -465,7 +559,8 @@ class RulePush(Cog):
             keywords = None
             try:
                 rules = await self.rule_repo.get_rules(member.guild.id)
-                keywords = await self.rule_push_repo.get_keywords_for_session(session.id)
+                found_keywords, not_found_keywords = await self.rule_push_repo.get_keywords_for_session(session.id)
+                keywords = found_keywords + not_found_keywords
             except sqlite3.Error as err:
                 self.bot.log.error(f"Error loading rules/keywords for user {member.id}: {err}")
                 return await channel.send("error loading rules/keywords.")
@@ -476,7 +571,10 @@ class RulePush(Cog):
 
             rules_message = ""
             for rule in rendered_rules:
-                rules_message += f"**Rule {rule.rule_number}. {rule.title}**\n{rule.content}"
+                if rule.rule_number < 0:
+                    rules_message += f"**{rule.title}**\n{rule.content}"
+                else:
+                    rules_message += f"**Rule {rule.rule_number}. {rule.title}**\n{rule.content}"
 
             await self.send_long_message(channel, rules_message)
 
@@ -496,6 +594,20 @@ class RulePush(Cog):
         embed.color = discord.Color.red()
         embed.description = f"{member.mention} rejoined with a pending rulepush, but {reason}."
         return await self.bot.notification_service.send_notification(member.guild, embed)
+
+    async def confirm_action(self, ctx: commands.Context, channel: discord.abc.GuildChannel) -> bool:
+        """Waits up to one minute for the purge invoking user to confirm they actually want to purge
+
+        Returns: true if a purge should actually occur, false otherwise"""
+        await ctx.reply(
+            "**WARNING: sensitive information. Do not invoke command in general chat**. Type `yes` to continue, or `no` to cancel. (I will wait 1 minute for your response before automatically cancelling the command)",
+            mention_author=False)
+        response: discord.Message = await self.bot.await_message(channel, ctx.author, 60)
+        if response is None or response.content.lower() != "yes":
+            await ctx.reply("command cancelled", mention_author=False)
+            return False
+
+        return True
 
 async def setup(bot):
     await bot.add_cog(RulePush(bot))

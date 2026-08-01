@@ -260,6 +260,14 @@ class RolebanService:
 
         return 0
 
+    async def update_session_start_time(self, session_id: int, start_time: int):
+        """Updates the session start time, to accurately reflect when all rules have been posted in
+        a rulepush sessions"""
+        try:
+            await self.roleban_repo.update_roleban_start_time(session_id, start_time)
+        except sqlite3.Error as err:
+            self.bot.log.error(f"Error updating session start time for session ID {session_id}: {err}")
+
     async def reactivate_user_session(self, session_id: int, user_id: int, channel_id: int) -> int:
         """Reactivates a users session by setting the status to ACTIVE and updating the channel ID"""
         try:

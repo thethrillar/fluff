@@ -359,9 +359,7 @@ class Reply(Cog):
                     file=discord.File("assets/noreply.png"))
             elif violation_count >= violation_threshold:
                 self.remove_user_violation_count(message.guild.id, message.author.id)
-                return self.bot.dispatch(
-                    "violation_threshold_reached", message, message.author
-                )
+                return self.bot.dispatch("ping_violation_threshold_reached", message)
             elif (violation_count % remind_frequency) == 0:
                 await notify_modlog("Reminder sent.")
                 return await message.author.send(

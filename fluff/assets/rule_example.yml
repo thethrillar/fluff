@@ -2,6 +2,10 @@
 #automatically be displayed as "Rule 1. your rule title name here."
 title: your rule title name here
 
+#whether this rule should be hidden, and should only be displayed for users who are rulepushed
+#0 is false, 1 is true
+hidden: 0
+
 #this is the content of the rule. each line MUST be indented.
 #the | must remain untouched.
 #use double curly braces {{}} for areas of the rule you would like rulepush to apply.
