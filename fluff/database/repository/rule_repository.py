@@ -44,18 +44,28 @@ class RuleRepository:
             rule_number = int(rule_number)
             return Rule(rule_number, title, content)
 
-    async def add_rule(self, server_id: int, title: str, content: str) -> None:
+    async def add_rule(self, server_id: int, title: str, content: str, hidden: int) -> None:
         """Adds a rule to the rule table"""
         async with self.db.get_write_connection() as conn:
-            #get the next rule number for this server
-            cursor = await conn.execute(
-                "SELECT COALESCE(MAX(rule_number), 0) + 1 "
-                "FROM rule "
-                "WHERE server_id = ?",
-                (str(server_id),)
-            )
-            row = await cursor.fetchone()
-            next_rule_number = int(row[0])
+            next_rule_number: int = 0
+            if hidden == 0:
+                cursor = await conn.execute(
+                    "SELECT COALESCE(MAX(rule_number), 0) + 1 "
+                    "FROM rule "
+                    "WHERE server_id = ?",
+                    (str(server_id),)
+                )
+                row = await cursor.fetchone()
+                next_rule_number = int(row[0])
+            else:
+                cursor = await conn.execute(
+                    "SELECT MIN(COALESCE(MIN(rule_number), 0), 0) - 1 "
+                    "FROM rule "
+                    "WHERE server_id = ?",
+                    (str(server_id),)
+                )
+                row = await cursor.fetchone()
+                next_rule_number = int(row[0])
 
             await conn.execute(
                 "INSERT INTO rule (server_id, rule_number, title, content) "

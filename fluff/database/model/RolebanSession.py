@@ -16,3 +16,4 @@ class RolebanSession:
     type: RolebanType               # the type of roleban, e.g. rulepush or toss
     users: list[RolebanSessionUser] # the list of users who are apart of this roleban session
     created_at: int                 # the epoch timestamp representing when this roleban first occurred
+    start_time: int                 # the epoch timestamp representing when the final rulepush message was inserted. -1 if roleban that is not a rulepush

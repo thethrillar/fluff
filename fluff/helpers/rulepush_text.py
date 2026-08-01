@@ -82,12 +82,18 @@ def render_rules(rules: list[Rule], chosen_keywords: list[str]) -> list[Rule] | 
     if chosen_keywords is None or rules is None:
         return None
 
+    rules = sorted(rules, key=sort_key)
     slots = collect_slots(rules)
     if len(slots) < len(chosen_keywords):
         return None
 
     chosen_slots = random.sample(slots, len(chosen_keywords))
     return _apply_slots(rules, list(zip(chosen_slots, chosen_keywords)))
+
+def sort_key(rule: Rule):
+    """Hidden rules are negative, and we need to ensure they come after all the normal rules"""
+    is_negative = rule.rule_number < 0
+    return (is_negative, -rule.rule_number if is_negative else rule.rule_number)
 
 def _apply_slots(rules: list[Rule], chosen: list[tuple]) -> list[Rule]:
     """Applies the chosen (slot, keyword) pairs to their rules.

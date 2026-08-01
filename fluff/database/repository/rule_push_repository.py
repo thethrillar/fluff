@@ -51,19 +51,28 @@ class RulePushRepository:
             rows = await cursor.fetchall()
             return [row[0] for row in rows]
 
-    async def get_keywords_for_session(self, session_id: int) -> list[str]:
+    async def get_keywords_for_session(self, session_id: int) -> tuple[list[str], list[str]]:
         """Fetches the keywords for this session
-        Returns: a list of keywords"""
+        Returns: a tuple lists, where the first list are the keywords the user has found, and the second
+        list are the keywords the user has not found"""
         async with self.db.get_read_connection() as conn:
             cursor = await conn.execute(
-                "SELECT keyword "
+                "SELECT keyword, found "
                 "FROM rule_push_session_keyword "
                 "WHERE session_id = ? "
                 "ORDER BY keyword ASC",
                 (session_id,)
             )
             rows = await cursor.fetchall()
-            return [row[0] for row in rows]
+            found_keywords: list[str] = []
+            not_found_keywords: list[str] = []
+            for row in rows:
+                if int(row[1]) == 1:
+                    found_keywords.append(row[0])
+                else:
+                    not_found_keywords.append(row[0])
+
+            return found_keywords, not_found_keywords
 
     async def add_keywords(self, server_id: int, keywords_list: list[str]) -> int:
         """Adds a list of keywords to this server"""

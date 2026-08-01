@@ -34,61 +34,17 @@ class Rules(Cog):
 
         - `number`
         The rule associated with this rule number to post. Optional."""
-        summary_embed = stock_embed(self.bot)
-        summary_embed.title = "Rules"
-        summary_embed.color = discord.Color.red()
-        summary_embed.set_author(
-            name=ctx.author, icon_url=ctx.author.display_avatar.url
-        )
+        await self.get_rule_info(ctx, False, number)
 
-        if not number:
-            server_rules: list[Rule] = []
-            try:
-                server_rules = await self.rule_repo.get_rules(ctx.guild.id)
-            except sqlite3.Error as err:
-                self.bot.log.error(f"Error getting rule list for server {ctx.guild.id}: {err}")
-                return await ctx.reply("Error getting rule list", mention_author=False)
 
-            if not server_rules:
-                summary_embed.add_field(
-                    name="No Rules",
-                    value="There are no rules available in this server.",
-                    inline=False,
-                )
-            else:
-                for rule in server_rules:
-                    summary_embed.add_field(
-                        name=f"**{rule.rule_number}**",
-                        value=f"> **{io.StringIO(rule.title).readline()}.**",
-                        inline=False,
-                    )
+    @commands.bot_has_permissions(embed_links=True)
+    @commands.guild_only()
+    @commands.group(aliases=["hiddenrules"], invoke_without_command=True)
+    @commands.check(isadmin)
+    async def hiddenrule(self, ctx: commands.Context, *, number=None):
+        """Displays hidden rules. Only viewable by mods"""
+        await self.get_rule_info(ctx, True, number)
 
-            return await ctx.reply(embed=summary_embed, mention_author=False)
-
-        try:
-            number = int(number)
-        except ValueError:
-            return await ctx.reply("Please provide a valid number", mention_author=False)
-
-        rule: Rule | None = None
-        try:
-            rule = await self.rule_repo.get_rule_by_number(ctx.guild.id, number)
-        except sqlite3.Error as err:
-            self.bot.log.error(f"Error getting rule for server {ctx.guild.id}: {err}")
-            return await ctx.reply("Error getting rule with that rule number", mention_author=False)
-
-        if rule:
-            return await ctx.reply(
-                content=f"**Rule {rule.rule_number}. {rule.title}.**\n{rule.content.replace("{{", "").replace("}}", "")}",
-                mention_author=False,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-        else:
-            return await ctx.reply(
-                content=f"Rule `{number}` not found.",
-                mention_author=False,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
 
     @commands.check(isadmin)
     @rule.command(aliases=["add"])
@@ -111,9 +67,10 @@ class Rules(Cog):
 
         title = parsed_rules["title"]
         content = parsed_rules["content"]
+        hidden = parsed_rules["hidden"]
 
         try:
-            await self.rule_repo.add_rule(ctx.guild.id, title, content)
+            await self.rule_repo.add_rule(ctx.guild.id, title, content, hidden)
         except sqlite3.Error as err:
             self.bot.log.error(f"Error attempting to add new rule to rules table for server {ctx.guild.id}: {err}")
             return await ctx.reply(f"Error trying to add rule.", mention_author=False)
@@ -169,6 +126,67 @@ class Rules(Cog):
 
         return await ctx.reply(f"Rule {rule_number} not found.", mention_author=False)
 
+    async def get_rule_info(self, ctx: commands.Context, hidden: bool, number: int | None):
+        summary_embed = stock_embed(self.bot)
+        summary_embed.title = "Rules"
+        summary_embed.color = discord.Color.red()
+        summary_embed.set_author(
+            name=ctx.author, icon_url=ctx.author.display_avatar.url
+        )
+
+        if not number:
+            server_rules: list[Rule] = []
+            try:
+                server_rules = await self.rule_repo.get_rules(ctx.guild.id)
+                if hidden:
+                    server_rules = [db_rule for db_rule in server_rules if db_rule.rule_number < 0]
+                else:
+                    server_rules = [db_rule for db_rule in server_rules if db_rule.rule_number > 0]
+            except sqlite3.Error as err:
+                self.bot.log.error(f"Error getting rule list for server {ctx.guild.id}: {err}")
+                return await ctx.reply("Error getting rule list", mention_author=False)
+
+            if not server_rules:
+                summary_embed.add_field(
+                    name="No Rules",
+                    value="There are no rules available in this server.",
+                    inline=False,
+                )
+            else:
+                for rule in server_rules:
+                    summary_embed.add_field(
+                        name=f"**{rule.rule_number}**",
+                        value=f"> **{io.StringIO(rule.title).readline()}.**",
+                        inline=False,
+                    )
+
+            return await ctx.reply(embed=summary_embed, mention_author=False)
+
+        try:
+            number = int(number)
+        except ValueError:
+            return await ctx.reply("Please provide a valid number", mention_author=False)
+
+        rule: Rule | None = None
+        try:
+            rule = await self.rule_repo.get_rule_by_number(ctx.guild.id, number)
+        except sqlite3.Error as err:
+            self.bot.log.error(f"Error getting rule for server {ctx.guild.id}: {err}")
+            return await ctx.reply("Error getting rule with that rule number", mention_author=False)
+
+        if rule and ((hidden is True and rule.rule_number < 0) or (hidden is False and rule.rule_number > 0)):
+            return await ctx.reply(
+                content=f"**Rule {rule.rule_number}. {rule.title}.**\n{rule.content.replace("{{", "").replace("}}", "")}",
+                mention_author=False,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        else:
+            return await ctx.reply(
+                content=f"Rule `{number}` not found.",
+                mention_author=False,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+
     async def validate_attachment(self, ctx: commands.Context, attachment: discord.Attachment) -> dict | None:
         """Validates the attachment, ensuring the file and its contents are as expected
         Returns: dict if the validation passed, otherwise None"""
@@ -193,6 +211,14 @@ class Rules(Cog):
 
         if "title" not in parsed_rules or "content" not in parsed_rules:
             await ctx.reply("Rule file must contain both `title` and `content`.", mention_author=False)
+            return None
+
+        if "hidden" not in parsed_rules:
+            await ctx.reply("Rule file must contain `hidden` field.", mention_author=False)
+            return None
+
+        if not isinstance(parsed_rules["hidden"], int) or parsed_rules["hidden"] < 0 or parsed_rules["hidden"] > 1:
+            await ctx.reply("`hidden` field must be set to either 0 or 1", mention_author=False)
             return None
 
         if not isinstance(parsed_rules["title"], str) or not isinstance(parsed_rules["content"], str):
