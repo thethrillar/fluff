@@ -60,6 +60,9 @@ async def ismod(ctx):
 
 def check_if_target_is_staff(bot, target: discord.Member, config_service: ConfigService) -> bool:
     """Alternative way to check if target is staff"""
+    if target is None:
+        return False
+
     mod_role = bot.pull_role(
         target.guild, config_service.get_server_config(target.guild.id, "staff", "modrole")
     )

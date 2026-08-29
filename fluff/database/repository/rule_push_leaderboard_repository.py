@@ -29,8 +29,8 @@ class RulePushLeaderboardRepository:
 
         return leaderboard_entries
 
-    async def update_rule_push_leaderboard(self, user_id: int, completion_time: int, completion_date: int) -> None:
-        """Updates the rule_push_leaderboard table"""
+    async def update_rule_push_leaderboard(self, user_id: int, completion_time: int, completion_date: int) -> str | None:
+        """Updates the rule_push_leaderboard table, returns users rank, if applicable"""
         async with self.db.get_write_connection() as conn:
             await conn.execute(
                 "INSERT INTO rule_push_leaderboard (user_id, completion_time, completion_date) "
@@ -46,7 +46,51 @@ class RulePushLeaderboardRepository:
                 "WHERE user_id NOT IN "
                 "(SELECT user_id FROM rule_push_leaderboard "
                 "ORDER BY completion_time ASC, completion_date ASC "
-                "LIMIT 20)"
+                "LIMIT 10000)"
             )
-
             await conn.commit()
+
+            cursor = await conn.execute(
+                "SELECT rank, total FROM ("
+                "SELECT user_id, RANK() OVER (ORDER BY completion_time ASC, completion_date ASC) AS rank, "
+                "COUNT(*) OVER () AS total "
+                "FROM rule_push_leaderboard"
+                ") "
+                "WHERE user_id = ?;",
+                (user_id,)
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                return None
+
+            rank, total = row
+            return f"{rank}/{total}"
+
+    async def remove_user_from_leaderboard(self, user_id: int) -> None:
+        """Removes a user from the leaderboard, if they exist"""
+        async with self.db.get_write_connection() as conn:
+            await conn.execute(
+                "DELETE FROM rule_push_leaderboard WHERE user_id = ?",
+                (user_id,)
+            )
+            await conn.commit()
+
+    async def get_user_position(self, user_id: int) -> tuple[int, str] | None:
+        """Fetches the user's position and rank from the leaderboard, if applicable"""
+        async with self.db.get_read_connection() as conn:
+            cursor = await conn.execute(
+                "SELECT rank, total, completion_time FROM ("
+                "SELECT user_id, completion_time, RANK() OVER (ORDER BY completion_time ASC, completion_date ASC) AS rank, "
+                "COUNT(*) OVER () AS total "
+                "FROM rule_push_leaderboard"
+                ") "
+                "WHERE user_id = ?;",
+                (user_id,)
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                return None
+
+            rank, total, completion_time = row
+            completion_time = int(completion_time)
+            return (completion_time, f"{rank}/{total}")

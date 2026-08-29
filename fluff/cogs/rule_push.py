@@ -1,16 +1,19 @@
+import asyncio
 import re
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord.ext.commands import Cog
 
 from database.model.LeaderboardEntry import LeaderboardEntry
 from database.model.RolebanSession import RolebanSession, RolebanSessionUser
+from database.model.TempBannedUser import TempBannedUser
 from database.repository.rule_push_leaderboard_repository import RulePushLeaderboardRepository
 from database.repository.rule_push_repository import RulePushRepository
 from database.repository.rule_repository import RuleRepository
+from database.repository.tempban_repository import TempBanRepository
 from database.repository.user_metadata_repository import UserMetadataRepository
 from helpers.checks import ismod, check_if_target_is_staff
 from helpers.embeds import (
@@ -41,6 +44,13 @@ class RulePush(Cog):
         self.rule_push_leaderboard_repo: RulePushLeaderboardRepository = RulePushLeaderboardRepository(self.bot.db)
         self.user_metadata_repo: UserMetadataRepository = UserMetadataRepository(self.bot.db)
         self.rule_repo: RuleRepository = RuleRepository(self.bot.db)
+        self.tempban_repo: TempBanRepository = TempBanRepository(self.bot.db)
+
+    async def cog_load(self):
+        self.kick_task.start()
+
+    async def cog_unload(self):
+        self.kick_task.cancel()
 
     async def send_long_message(self, channel: discord.TextChannel, text: str) -> discord.Message:
         """Sends text if its under the message limit, otherwise sends the message in fixed DISCORD_MESSAGE_LIMIT-sized chunks."""
@@ -86,7 +96,10 @@ class RulePush(Cog):
         if member.id == ctx.author.id:
             return await ctx.reply("You cannot rulepush yourself.", mention_author=False)
 
-        return await self.perform_rulepush(ctx, member)
+        if check_if_target_is_staff(self.bot, member, self.bot.config_service):
+            return await ctx.reply("You cannot rulepush other staff members.", mention_author=False)
+
+        return await self.perform_rulepush(ctx, member, False)
 
     @commands.bot_has_permissions(manage_roles=True, manage_channels=True)
     @commands.check(ismod)
@@ -296,9 +309,7 @@ class RulePush(Cog):
 
         for rank, entry in enumerate(leaderboard_entries):
             position = medals.get(rank, f"**{rank + 1}.**")
-            minutes, remainder_ms = divmod(entry.completion_time, 60000)
-            seconds = remainder_ms / 1000
-            time_str = f"{minutes}m, {seconds:.3f}s"
+            time_str = self.caclulate_completion_time(entry.completion_time)
             date_str = f"<t:{entry.completion_date}:d> at <t:{entry.completion_date}:T>"
             lines.append(f"{position} **{time_str}** by <@{entry.user_id}> ({entry.user_name}) on {date_str}\n")
 
@@ -306,6 +317,21 @@ class RulePush(Cog):
         embed.set_footer(text=f"Top 20 entries")
 
         return await ctx.reply(embed=embed, mention_author=False)
+
+    @rulepush.command(aliases=["rank"])
+    @commands.bot_has_permissions(manage_roles=True, manage_channels=True)
+    @commands.guild_only()
+    async def position(self, ctx: commands.Context):
+        """Returns the users rulepush rank"""
+        if ctx.author is None or ctx.guild is None:
+            return await ctx.reply("You must be in a server to do this.", mention_author=False)
+
+        position_data : tuple[int, str] | None = await self.rule_push_leaderboard_repo.get_user_position(ctx.author.id)
+        if position_data is None:
+            return await ctx.reply("No rulepush position data found.", mention_author=False)
+
+        time_str = self.caclulate_completion_time(position_data[0])
+        return await ctx.reply(f"You are rank **{position_data[1]}** with a time of **{time_str}**.", mention_author=False)
 
     @rulepush.command(aliases=["myself"])
     @commands.bot_has_permissions(manage_roles=True, manage_channels=True)
@@ -315,7 +341,9 @@ class RulePush(Cog):
         if ctx.author is None or ctx.guild is None:
             return await ctx.reply("You must be in a server to do this.", mention_author=False)
 
-        return await self.perform_rulepush(ctx, ctx.author)
+        is_target_staff: bool = check_if_target_is_staff(self.bot, ctx.author, self.bot.config_service)
+
+        return await self.perform_rulepush(ctx, ctx.author, is_target_staff)
 
     @Cog.listener()
     async def on_ping_violation_threshold_reached(self, message: discord.Message):
@@ -323,17 +351,17 @@ class RulePush(Cog):
         if ctx is None or ctx.author is None or ctx.guild is None:
             return
 
-        await self.perform_rulepush(ctx, ctx.author, True)
+        is_target_staff: bool = check_if_target_is_staff(self.bot, ctx.author, self.bot.config_service)
+
+        await self.perform_rulepush(ctx, ctx.author, is_target_staff, True)
         return await message.reply(
                     f"**{self.bot.pacify_name(message.author.name)}** has been automatically rulepushed for reaching the reply ping preference violation threshold."
                 )
 
-    async def perform_rulepush(self, ctx: commands.Context, member: discord.Member, ping_violation: bool = False):
+    async def perform_rulepush(self, ctx: commands.Context, member: discord.Member, is_target_staff: bool, ping_violation: bool = False):
         """performs the actual rulepush action"""
         if member.bot:
             return await ctx.reply("You cannot rulepush a bot.", mention_author=False)
-        if check_if_target_is_staff(self.bot, member, self.bot.config_service):
-            return await ctx.reply("You cannot rulepush staff members.", mention_author=False)
 
         try:
             rules = await self.rule_repo.get_rules(ctx.guild.id)
@@ -359,7 +387,7 @@ class RulePush(Cog):
                 mention_author=False,
             )
 
-        session: RolebanSession = await self.bot.roleban_service.roleban_users(ctx, [member], RolebanType.RULEPUSH)
+        session: RolebanSession = await self.bot.roleban_service.roleban_users(ctx, [member], RolebanType.RULEPUSH, not is_target_staff)
         if session is None:
             return
 
@@ -411,8 +439,6 @@ class RulePush(Cog):
             return
         if not CHANNEL_NAME_PATTERN.match(message.channel.name):
             return
-        if check_if_target_is_staff(self.bot, message.author, self.bot.config_service):
-            return
 
         session: RolebanSession = await self.bot.roleban_service.get_roleban_session_by_channel(message.guild.id, message.channel.id)
         if session is None or session.users is None or len(session.users) <= 0:
@@ -448,11 +474,20 @@ class RulePush(Cog):
 
                 end_time = int(message.created_at.timestamp() * 1000)
                 total_elapsed_millis = end_time - session.start_time
+                rule_push_rank: str | None = None
                 if total_elapsed_millis < MAX_MILLISECONDS_RULEPUSH_LEADERBOARD:
                     try:
-                        await self.rule_push_leaderboard_repo.update_rule_push_leaderboard(message.author.id, total_elapsed_millis, int(message.created_at.timestamp()))
+                        rule_push_rank = await self.rule_push_leaderboard_repo.update_rule_push_leaderboard(message.author.id, total_elapsed_millis, int(message.created_at.timestamp()))
                     except sqlite3.Error as err:
                         self.bot.log.error(f"Error updating rulepush leaderboard for {message.author.id}: {err}")
+
+                time_str = self.caclulate_completion_time(total_elapsed_millis)
+                if rule_push_rank is None:
+                    await message.channel.send(f"You finished with a time of **{time_str}**.")
+                else:
+                    await message.channel.send(f"You finished with a time of **{time_str}**. Your current rank is **{rule_push_rank}**.")
+
+                await asyncio.sleep(5)
 
             ctx: commands.Context = await self.bot.get_context(message)
             released = await self.bot.roleban_service.unroleban_user(ctx, session, message.author.id, message.channel)
@@ -588,6 +623,20 @@ class RulePush(Cog):
         )
         await self.bot.notification_service.send_notification(member.guild, embed)
 
+    @Cog.listener()
+    async def on_member_ban(self, guild: discord.Guild, user: discord.User | discord.Member):
+        if user is None or user.id is None:
+            return
+
+        banned_user_info: TempBannedUser | None = await self.tempban_repo.get_banned_user_info(user.id, guild.id)
+        if banned_user_info is not None:
+            return
+
+        try:
+            await self.rule_push_leaderboard_repo.remove_user_from_leaderboard(user.id)
+        except sqlite3.Error as err:
+            self.bot.log.error(f"Error removing user {user.id} from rule push leaderboard: {err}")
+
     async def send_rulepush_resume_failure_notification(self, member: discord.Member, reason: str):
         embed = stock_embed(self.bot)
         embed.title = "⚠️ Rulepush Resume Failed"
@@ -608,6 +657,75 @@ class RulePush(Cog):
             return False
 
         return True
+
+    def caclulate_completion_time(self, completion_time: int) -> str:
+        minutes, remainder_ms = divmod(completion_time, 60000)
+        seconds = remainder_ms / 1000
+        return f"{minutes}m, {seconds:.3f}s"
+
+    @tasks.loop(minutes=10)
+    async def kick_task(self):
+        """Scheduled cron job task that runs every ten minutes. This job is responsible for
+        informing rulepushed users at the 24 hour mark that they have 24 hours left to finish the rulepush.
+        If the rulepush has met or exceeded the 48 hour mark, then the user is automatically kicked,
+        and the rulepush channel is deleted."""
+        try:
+            for guild in self.bot.guilds:
+                sessions: list[RolebanSession] | None = await self.bot.roleban_service.get_open_sessions(guild.id)
+
+                if not sessions:
+                    continue
+
+                sessions = [session for session in sessions if session.type == RolebanType.RULEPUSH and session.users[0].status == RolebanStatus.ACTIVE.value]
+
+                for session in sessions:
+                    channel: discord.TextChannel = self.bot.get_channel(session.channel_id) if session.channel_id else None
+                    if not channel:
+                        continue
+
+                    member: discord.Member = guild.get_member(session.users[0].user_id)
+                    if member is None:
+                        try:
+                            member = await guild.fetch_member(session.users[0].user_id)
+                        except Exception as e:
+                            member = None
+
+                    if check_if_target_is_staff(self.bot, member, self.bot.config_service):
+                        continue
+
+                    current_time = discord.utils.utcnow()
+                    channel_age = current_time - channel.created_at
+                    reminder_sent: bool = await self.rule_push_repo.get_rulepush_reminder(session.id)
+                    if not reminder_sent and channel_age > timedelta(hours=24):
+                        try:
+                            limit = int((current_time + timedelta(hours=24)).timestamp())
+                            await channel.send(f"<@{session.users[0].user_id}>, you have spent 24 hours without completing the rulepush."
+                                               f"You have until <t:{limit}:f> (<t:{limit}:R>) before you will be automatically kicked.")
+                            await self.rule_push_repo.update_rulepush_reminder(session.id, 1)
+                        except Exception as err:
+                            self.bot.log.error(f"Error while sending reminder for session {session.id}: {err}")
+                    elif reminder_sent and channel_age > timedelta(hours=48):
+                        try:
+                            if member is not None:
+                                await member.kick(reason=f"[Kick performed by Fluff] Rulepush time limit exceeded")
+                            await self.rule_push_repo.update_rulepush_reminder(session.id, 0)
+                            await self.bot.roleban_service.update_user_session_status(session.id, session.users[0].user_id, RolebanStatus.LEFT)
+
+                            embed = stock_embed(self.bot)
+                            embed.title = "Rulepush Session Closed (Fluff)"
+                            embed.color = discord.Color.orange()
+                            embed.description = f"`#{channel.name}`'s session was closed due to exceeding the maximum rulepush time limit"
+                            await self.bot.notification_service.send_notification(channel.guild, embed)
+
+                            return await channel.delete(reason="Channel closed for exceeding rulepush time limit")
+                        except Exception as err:
+                            self.bot.log.error(f"Error while kicking user from expired session {session.id}: {err}")
+        except Exception as e:
+            self.bot.log.error(f"Error performing rulepush kick task: {e}")
+
+    @kick_task.before_loop
+    async def before_kick_task(self):
+        await self.bot.wait_until_ready()
 
 async def setup(bot):
     await bot.add_cog(RulePush(bot))

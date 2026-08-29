@@ -1,8 +1,8 @@
 # Privacy Policy for Fluff
  
-**Effective date:** June 29, 2026
+**Effective date:** August 01, 2026
 
-**Last updated:** June 29, 2026
+**Last updated:** August 01, 2026
  
 This privacy policy explains what data Fluff collects, how it is used, how it is stored, and how you can have it deleted. By using the bot, you agree to the practices described here. 
  
@@ -10,7 +10,7 @@ This privacy policy explains what data Fluff collects, how it is used, how it is
  
 The bot only collects data as necessary to provide its moderation and utility features. Depending on which features a server uses, this may include:
  
-- **Discord identifiers** - User/snowflake ID's, guild ID's, channel ID's, and role ID's.
+- **Discord identifiers** - User/snowflake ID's, guild ID's, channel ID's, role ID's, and usernames.
 - **Timestamps** - The seven most recent timestamps for when a user violated a ping reply preference are stored entirely in memory, do not persist on bot restart, and are removed within a short period of time.
 - **Server configuration** - Settings, whitelists, snippet text, and other configurations set by server administrators.
 

@@ -401,7 +401,7 @@ class Mod(Cog):
         await ctx.send(f"**{target.mention}** is now BANNED{duration_part}.\n{failmsg}")
 
     @commands.bot_has_permissions(ban_members=True)
-    @commands.check(ismod)
+    @commands.check(isadmin)
     @commands.guild_only()
     @commands.command(aliases=["bandel"])
     async def dban(
@@ -472,7 +472,7 @@ class Mod(Cog):
         )
 
     @commands.bot_has_permissions(ban_members=True)
-    @commands.check(ismod)
+    @commands.check(isadmin)
     @commands.guild_only()
     @commands.command()
     async def massban(self, ctx, *, targets: str):
@@ -513,7 +513,7 @@ class Mod(Cog):
         await msg.edit(content=f"All {len(targets_int)} users are now BANNED.")
 
     @commands.bot_has_permissions(ban_members=True)
-    @commands.check(ismod)
+    @commands.check(isadmin)
     @commands.guild_only()
     @commands.command()
     async def unban(self, ctx, target: discord.User, *, reason: str = ""):
@@ -541,7 +541,7 @@ class Mod(Cog):
             await ctx.send(f"No ban entry for {safe_name} found.")
 
     @commands.bot_has_permissions(ban_members=True)
-    @commands.check(ismod)
+    @commands.check(isadmin)
     @commands.guild_only()
     @commands.command(aliases=["silentban"])
     async def sban(self, ctx, target: discord.User, *, reason: str = ""):

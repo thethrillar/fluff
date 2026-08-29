@@ -33,8 +33,8 @@ class RolebanService:
 
         return None
 
-    async def roleban_users(self, ctx: commands.Context, members: list[discord.Member], roleban_type: RolebanType) -> RolebanSession | None:
-        """Rolebans a user by creating a new roleban channel, removing the users roles, and adding the roleban role
+    async def roleban_users(self, ctx: commands.Context, members: list[discord.Member], roleban_type: RolebanType, remove_roles: bool = True) -> RolebanSession | None:
+        """Rolebans a user by creating a new roleban channel, removing the users roles (if remove_roles = true), and adding the roleban role
         Returns: an instance of RolebanSession if the user was successfully rolebanned, otherwise None, meaning an error occurred and the user was not rolebanned"""
 
         for member in members:
@@ -61,10 +61,15 @@ class RolebanService:
         roleban_role = self.bot.pull_role(ctx.guild, self.config_service.get_server_config(ctx.guild.id, "toss", "tossrole"))
         user_ids_to_all_roles: dict[int, list[Role]] = {}
         user_ids_to_unassignable_roles: dict[int, list[Role]] = {}
-        for member in members:
-            all_roles, unassignable_roles = await self.get_non_rolebanned_user_roles(ctx.guild, member, roleban_role)
-            user_ids_to_all_roles[member.id] = all_roles
-            user_ids_to_unassignable_roles[member.id] = unassignable_roles
+        if remove_roles:
+            for member in members:
+                all_roles, unassignable_roles = await self.get_non_rolebanned_user_roles(ctx.guild, member, roleban_role)
+                user_ids_to_all_roles[member.id] = all_roles
+                user_ids_to_unassignable_roles[member.id] = unassignable_roles
+        else:
+            for member in members:
+                user_ids_to_all_roles[member.id] = list()
+                user_ids_to_unassignable_roles[member.id] = list()
 
         try:
             session = await self.roleban_repo.create_session(
@@ -83,7 +88,8 @@ class RolebanService:
         all_successful = True
         for member in members:
             try:
-                await self.replace_roles(member, [roleban_role], user_ids_to_unassignable_roles[member.id],f"User rolebanned by {ctx.author} ({ctx.author.id})")
+                if remove_roles:
+                    await self.replace_roles(member, [roleban_role], user_ids_to_unassignable_roles[member.id],f"User rolebanned by {ctx.author} ({ctx.author.id})")
                 await channel.set_permissions(member, read_messages=True)
             except (discord.Forbidden, discord.HTTPException) as err:
                 all_successful = False
@@ -123,11 +129,12 @@ class RolebanService:
 
         restored_roles, failed_roles = [], []
         if member is not None:
-            roles = [ctx.guild.get_role(role_id) for role_id in role_ids]
-            roles = [role for role in roles if role is not None]
-            assignable = [role for role in roles if role.is_assignable()]
-            unassignable = [role for role in roles if not role.is_assignable()]
-            restored_roles, failed_roles = await self.replace_roles(member, assignable, unassignable, f"User unrolebanned by {ctx.author} ({ctx.author.id})")
+            if role_ids is not None:
+                roles = [ctx.guild.get_role(role_id) for role_id in role_ids]
+                roles = [role for role in roles if role is not None]
+                assignable = [role for role in roles if role.is_assignable()]
+                unassignable = [role for role in roles if not role.is_assignable()]
+                restored_roles, failed_roles = await self.replace_roles(member, assignable, unassignable, f"User unrolebanned by {ctx.author} ({ctx.author.id})")
             if channel is not None:
                 try:
                     await channel.set_permissions(member, read_messages=False)
@@ -262,7 +269,7 @@ class RolebanService:
 
     async def update_session_start_time(self, session_id: int, start_time: int):
         """Updates the session start time, to accurately reflect when all rules have been posted in
-        a rulepush sessions"""
+        a rulepush session"""
         try:
             await self.roleban_repo.update_roleban_start_time(session_id, start_time)
         except sqlite3.Error as err:
