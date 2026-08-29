@@ -129,7 +129,7 @@ class RolebanService:
 
         restored_roles, failed_roles = [], []
         if member is not None:
-            if role_ids is not None:
+            if role_ids:
                 roles = [ctx.guild.get_role(role_id) for role_id in role_ids]
                 roles = [role for role in roles if role is not None]
                 assignable = [role for role in roles if role.is_assignable()]
