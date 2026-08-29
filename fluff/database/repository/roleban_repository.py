@@ -51,14 +51,15 @@ class RolebanRepository:
                     [(session_id, str(user_id), RolebanStatus.ACTIVE.value, str(rolebanned_by)) for user_id in user_ids_to_roles]
                 )
 
-                await conn.executemany(
-                    "INSERT INTO roleban_session_user_role (session_id, user_id, role_id) VALUES (?, ?, ?)",
-                    [
-                        (session_id, str(user_id), str(role.id))
-                        for user_id, roles in user_ids_to_roles.items()
-                        for role in roles
-                    ]
-                )
+                if any(roles for roles in user_ids_to_roles.values()):
+                    await conn.executemany(
+                        "INSERT INTO roleban_session_user_role (session_id, user_id, role_id) VALUES (?, ?, ?)",
+                        [
+                            (session_id, str(user_id), str(role.id))
+                            for user_id, roles in user_ids_to_roles.items()
+                            for role in roles
+                        ]
+                    )
 
             await conn.commit()
             users = [
@@ -200,6 +201,9 @@ class RolebanRepository:
                 (session_id, str(user_id))
             )
             rows = await cursor.fetchall()
+            if not rows:
+                return []
+
             return [int(row[0]) for row in rows]
 
     def row_to_session(self, row) -> RolebanSession:

@@ -8,7 +8,7 @@ import asyncio
 import zipfile
 from discord.ext import commands
 from discord.ext.commands import Cog
-from helpers.checks import ismod
+from helpers.checks import ismod, check_if_target_is_staff
 from helpers.datafiles import toss_userlog, get_tossfile, set_tossfile
 from helpers.placeholders import random_msg
 from helpers.archive import log_channel
@@ -262,6 +262,8 @@ class ModToss(Cog):
                 errors += f"\n- {self.username_system(us)}\n  You cannot toss yourself."
             elif us.id == self.bot.application_id:
                 errors += f"\n- {self.username_system(us)}\n  You cannot toss the bot."
+            elif check_if_target_is_staff(self.bot, us, self.bot.config_service):
+                errors += f"\n- {self.username_system(us)}\n  You cannot toss a staff member."
             elif self.get_session(us) and toss_role in us.roles:
                 errors += (
                     f"\n- {self.username_system(us)}\n  This user is already tossed."

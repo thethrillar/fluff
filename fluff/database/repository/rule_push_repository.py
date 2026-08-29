@@ -96,3 +96,29 @@ class RulePushRepository:
             await conn.commit()
 
             return cursor.rowcount
+
+    async def get_rulepush_reminder(self, session_id:int) -> bool:
+        """Fetches whether this session has posted a reminder about the time limit"""
+        async with self.db.get_read_connection() as conn:
+            cursor = await conn.execute(
+                "SELECT reminder_sent "
+                "FROM rule_push_reminder "
+                "WHERE session_id = ? ",
+                (session_id,)
+            )
+            row = await cursor.fetchone()
+
+            if row is None:
+                return False
+            return bool(row[0])
+
+    async def update_rulepush_reminder(self, session_id: int, reminder_sent_value: int) -> None:
+        """Creates or updates the rulepush reminder for this session"""
+        async with self.db.get_write_connection() as conn:
+            await conn.execute(
+                "INSERT INTO rule_push_reminder (session_id, reminder_sent) "
+                "VALUES (?, ?) "
+                "ON CONFLICT(session_id) DO UPDATE SET reminder_sent = ?",
+                (session_id, reminder_sent_value, reminder_sent_value)
+            )
+            await conn.commit()
