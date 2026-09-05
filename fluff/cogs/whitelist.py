@@ -1,3 +1,4 @@
+import asyncio
 import sqlite3
 from typing import Optional
 
@@ -5,12 +6,12 @@ import discord
 from discord.ext import commands
 from discord.ext.commands import Cog
 
+from database.model.TempBannedUser import TempBannedUser
+from database.repository.tempban_repository import TempBanRepository
+from database.repository.user_metadata_repository import UserMetadataRepository
 from database.repository.whitelist_ping_repository import WhitelistPingRepository
-from helpers.embeds import stock_embed
 from converter.mention_or_id_converter import MentionOrIDUser, MentionOrIDMember
-import io
-
-MAX_CHARACTERS_PER_EMBED = 980
+from model.WhitelistTextPaginator import WhitelistTextPaginator
 
 """Whitelist Cog which allows users to add other users to their ping whitelist. This prevents any whitelisted users
 from receiving ping violations."""
@@ -18,6 +19,8 @@ class Whitelist(Cog):
     def __init__(self, bot):
         self.bot = bot
         self.whitelist_ping_repo: WhitelistPingRepository = WhitelistPingRepository(self.bot.db)
+        self.user_metadata_repo: UserMetadataRepository = UserMetadataRepository(self.bot.db)
+        self.tempban_repo: TempBanRepository = TempBanRepository(self.bot.db)
 
     @commands.bot_has_permissions(embed_links=True)
     @commands.guild_only()
@@ -33,15 +36,15 @@ class Whitelist(Cog):
         - `user`
         The user whose whitelist you would like to check. Optional. returns your own whitelist if no user is passed
         """
-        whitelisted_users = list()
+        count = 0
         user_id = user.id if user else ctx.author.id
         try:
-            whitelisted_users = await self.whitelist_ping_repo.get_whitelisted_users(user_id)
+            count = await self.whitelist_ping_repo.get_whitelisted_users_count(user_id)
         except sqlite3.Error as err:
             self.bot.log.error(f"Failed to get whitelisted users for user ID {user_id}: {err}")
             return await ctx.reply(content="Unable to get whitelisted users", mention_author=False)
 
-        if not whitelisted_users:
+        if count == 0:
             if user_id == ctx.author.id:
                 return await ctx.reply(
                     content="You have not whitelisted any users yet. Use `pls whitelist add` to add users to your whitelist.",
@@ -52,25 +55,26 @@ class Whitelist(Cog):
                     mention_author=False)
 
         user_name = user.display_name if user else ctx.author.display_name
-        return await self.create_and_send_whitelist_embed(f"Whitelisted users for {user_name}", f"whitelisted-users-{user_id}", ctx, whitelisted_users)
+        return await self.send_whitelisted_by_user_embed(ctx, user_id, user_name)
 
     @whitelist.command()
     @commands.guild_only()
+    @commands.bot_has_permissions(embed_links=True)
     async def check(self, ctx: commands.Context):
         """Returns all users who have the author in their whitelist"""
-        users_who_have_whitelisted_author = list()
+        count = 0
         try:
-            users_who_have_whitelisted_author = await self.whitelist_ping_repo.get_users_who_whitelisted_user(ctx.author.id)
+            count = await self.whitelist_ping_repo.get_users_who_whitelisted_user_count(ctx.author.id)
         except sqlite3.Error as err:
             self.bot.log.error(f"Failed to get users who have whitelisted user ID {ctx.author.id}: {err}")
             return await ctx.reply(content="Unable to get users who have whitelisted you", mention_author=False)
 
-        if not users_who_have_whitelisted_author:
+        if count == 0:
             return await ctx.reply(
                 content="No one has whitelisted you yet.",
                 mention_author=False)
 
-        return await self.create_and_send_whitelist_embed(f"Users who have whitelisted {ctx.author.display_name}", f"users-who-whitelisted-{ctx.author.id}", ctx, users_who_have_whitelisted_author)
+        return await self.send_whitelisted_this_user_embed(ctx, ctx.author.id, ctx.author.display_name)
 
     @whitelist.command()
     @commands.guild_only()
@@ -80,15 +84,16 @@ class Whitelist(Cog):
             return await ctx.reply(content="Please include at least one valid user ID or user mention",
                                    mention_author=False)
 
-        user_ids_to_whitelist = list()
+        user_ids_to_whitelist: list[tuple[int, str]] = list()
         for member in members:
             if member.id == ctx.author.id:
                 return await ctx.reply(content="Cannot add yourself to your whitelist", mention_author=False)
             if member.bot:
                 return await ctx.reply(content="Bots cannot be added to your whitelist", mention_author=False)
-            user_ids_to_whitelist.append(member.id)
+            user_ids_to_whitelist.append((member.id, member.name))
         inserted = 0
         try:
+            await self.user_metadata_repo.update_users_metadata(user_ids_to_whitelist)
             inserted = await self.whitelist_ping_repo.add_whitelisted_users(ctx.author.id, user_ids_to_whitelist)
         except sqlite3.Error as err:
             self.bot.log.error(f"Failed to add whitelisted users for {ctx.author.id}: {err}")
@@ -126,64 +131,48 @@ class Whitelist(Cog):
             return await ctx.reply(content=f"Removed {user_ids_deleted}/{len(user_ids_to_remove)} mentioned users. Some users were not in your whitelist",
                                    mention_author=False)
 
-    async def create_and_send_whitelist_embed(self, embed_title: str, file_title: str, ctx: commands.Context, user_ids: list[int]):
-        """Constructs the embed consisting of the users that are whitelisted, and sends the response"""
-        embed = stock_embed(self.bot)
-        embed.color = discord.Color.light_embed()
-        embed.title = embed_title
 
-        partitioned_user_mentions = self.partition_user_mentions(user_ids)
-        for user_mention in partitioned_user_mentions:
-            embed.add_field(
-                name="",
-                value=user_mention,
-                inline=False,
-            )
+    async def send_whitelisted_by_user_embed(self, ctx: commands.Context, target_user_id: int, name: str):
+        """Sends embed containing users who this user has whitelisted"""
+        view = WhitelistTextPaginator(
+            page_fetcher=self.whitelist_ping_repo.get_whitelisted_users_page,
+            count_fetcher=self.whitelist_ping_repo.get_whitelisted_users_count,
+            target_user_id=target_user_id,
+            title=f"Whitelisted Users for {name}",
+            author_id=ctx.author.id,
+        )
+        embed = await view.build_embed()
+        msg = await ctx.reply(embed=embed, view=view if view.max_page > 0 else None, mention_author=False)
+        if view.max_page > 0:
+            view.message = msg
 
-        # length of embed can have no more than 6000 characters in it. That is somewhere above 200 people in a users whitelist.
-        # length of partitioned_user_mentions would require the user to have over 1000 people in their whitelist,
-        # so that is very unlikely.
-        if len(embed) > 6000 or len(partitioned_user_mentions) > 25:
-            file_content = ""
-            for user_mention in partitioned_user_mentions:
-                file_content += user_mention + "\n"
-            await ctx.send(
-                file=discord.File(
-                    io.StringIO(file_content),  # type:ignore
-                    filename=f"{file_title}.txt",
-                )
-            )
-        else:
-            await ctx.reply(embed=embed, mention_author=False)
+    async def send_whitelisted_this_user_embed(self, ctx: commands.Context, target_user_id: int, name: str):
+        """Sends embed containing users who this user has been whitelisted by"""
+        view = WhitelistTextPaginator(
+            page_fetcher=self.whitelist_ping_repo.get_users_who_whitelisted_user_page,
+            count_fetcher=self.whitelist_ping_repo.get_users_who_whitelisted_user_count,
+            target_user_id=target_user_id,
+            title=f"Users who have whitelisted {name}",
+            author_id=ctx.author.id,
+        )
+        embed = await view.build_embed()
+        msg = await ctx.reply(embed=embed, view=view if view.max_page > 0 else None, mention_author=False)
+        if view.max_page > 0:
+            view.message = msg
 
-    def partition_user_mentions(self, user_ids: list[int]) -> list[str]:
-        """Partitions user ID's into a list of user mentions. A discord embed only allows up to 1024 characters.
-        Any more than that, and we get an error. This method splits up user mentions into a list so that we can create
-        multiple embeds, if necessary.
+    @Cog.listener()
+    async def on_member_ban(self, guild: discord.Guild, user: discord.User | discord.Member):
+        if user is None or user.id is None:
+            return
 
-        Returns: a list of user mentions, where each string in the list is made up of multiple comma separated user
-        mentions"""
-        partitions = []
-        current = []
-        current_len = 0
+        banned_user_info: TempBannedUser | None = await self.tempban_repo.get_banned_user_info(user.id, guild.id)
+        if banned_user_info is not None:
+            return
 
-        for user_id in user_ids:
-            mention = f"<@{user_id}>"
-            # + 3 for " | "
-            characters_added = len(mention) + 3
-            if current_len + characters_added > MAX_CHARACTERS_PER_EMBED:
-                partitions.append(' | '.join(current))
-                current = [mention]
-                current_len = characters_added
-            else:
-                current.append(mention)
-                current_len += characters_added
-
-        if current:
-            partitions.append(' | '.join(current))
-
-        return partitions
+        try:
+            await self.whitelist_ping_repo.remove_from_all_whitelists(user.id)
+        except sqlite3.Error as err:
+            self.bot.log.error(f"Error removing user {user.id} from whitelists: {err}")
 
 async def setup(bot):
     await bot.add_cog(Whitelist(bot))
-
