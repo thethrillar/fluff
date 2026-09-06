@@ -100,9 +100,16 @@ tenure:
   # Role ID for the 'tenure disabled' role
   role_disabled:
 
+starboard:
+  # Channel ID where eligible starboard messages are sent
+  queue_channel:
+
+  # Channel ID where approved starboard messages are sent
+  starboard_channel:
+
 drive:
   folder:
   # Set the ID of the Google Drive folder that the file should be uploaded to.
 
 metadata:
-  version: 21
+  version: 22
