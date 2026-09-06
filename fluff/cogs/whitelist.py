@@ -1,4 +1,3 @@
-import asyncio
 import sqlite3
 from typing import Optional
 
@@ -11,7 +10,7 @@ from database.repository.tempban_repository import TempBanRepository
 from database.repository.user_metadata_repository import UserMetadataRepository
 from database.repository.whitelist_ping_repository import WhitelistPingRepository
 from converter.mention_or_id_converter import MentionOrIDUser, MentionOrIDMember
-from model.WhitelistTextPaginator import WhitelistTextPaginator
+from view.WhitelistTextPaginator import WhitelistTextPaginator
 
 """Whitelist Cog which allows users to add other users to their ping whitelist. This prevents any whitelisted users
 from receiving ping violations."""

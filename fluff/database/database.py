@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 
 DB_NAME = "fluff_database.db"
 BACKUP_DB_NAME = "fluff_database_backup.db"
-READ_CONNECTION_POOL_SIZE = 3
+READ_CONNECTION_POOL_SIZE = 5
 
 # ^V     -> Starts with a capital V
 # (\d+)  -> Capture group 1: The digits

@@ -152,6 +152,19 @@ properties:
           - string
           - "null"
         minimum: 100000000000000000
+  starboard:
+    type: object
+    properties:
+      queue_channel:
+        type:
+          - integer
+          - string
+          - "null"
+      starboard_channel:
+        type:
+          - integer
+          - string
+          - "null"
   overrides:
     type:
       - array
@@ -181,4 +194,4 @@ properties:
     type: object
     properties:
       version:
-        const: 21
+        const: 22
